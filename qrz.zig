@@ -171,4 +171,50 @@ pub const GaloisField = struct {
     }
 };
 
+// Reed-Solomon Error Correction
+pub const ReedSolomon = struct {
+    pub fn generatePolynomial(allocator: std.mem.Allocator, degree: u32) ![]u8 {
+        var poly = try allocator.alloc(u8, degree + 1);
+        @memset(poly, 0);
+        poly[0] = 1;
+
+        for (0..degree) |i| {
+            const factor = GaloisField.exp(@intCast(i));
+            for (0..i + 1) |j| {
+                const idx = i - j;
+                poly[idx + 1] ^= GaloisField.multiply(poly[idx], factor);
+            }
+        }
+
+        return poly;
+    }
+
+    pub fn encode(allocator: std.mem.Allocator, data: []const u8, ecc_count: u32) ![]u8 {
+        GaloisField.init();
+
+        const generator = try generatePolynomial(allocator, ecc_count);
+        defer allocator.free(generator);
+
+        var result = try allocator.alloc(u8, data.len + ecc_count);
+        @memcpy(result[0..data.len], data);
+        @memset(result[data.len..], 0);
+
+        for (0..data.len) |i| {
+            const coef = result[i];
+            if (coef != 0) {
+                for (0..generator.len) |j| {
+                    result[i + j] ^= GaloisField.multiply(generator[j], coef);
+                }
+            }
+        }
+
+        // Copy just the ECC bytes to a new allocation
+        const ecc_bytes = try allocator.alloc(u8, ecc_count);
+        @memcpy(ecc_bytes, result[data.len..]);
+        allocator.free(result);
+
+        return ecc_bytes;
+    }
+};
+
 
