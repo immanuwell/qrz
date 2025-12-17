@@ -1184,4 +1184,47 @@ pub const QRReader = struct {
     }
 };
 
+// CLI Parser and Main
+pub fn printHelp() void {
+    const help =
+        \\qrz - QR Code Generator CLI Tool v{s}
+        \\
+        \\USAGE:
+        \\    qrz generate [OPTIONS] <data>
+        \\
+        \\COMMANDS:
+        \\    generate    Generate a QR code from data
+        \\
+        \\GENERATE OPTIONS:
+        \\    <data>                      Data to encode (required unless -i is used)
+        \\    -i, --input <file>          Read data from file ("-" for stdin)
+        \\    -o, --output <file>         Output file (default: stdout/terminal)
+        \\    -t, --type <format>         Output format: png, txt, ansi, svg (default: png)
+        \\    -e, --error <level>         Error correction: L, M, Q, H (default: M)
+        \\    -s, --size <n>              Module size in pixels (default: 10)
+        \\    -m, --margin <n>            Quiet zone margin in modules (default: 4)
+        \\    --terminal                  Force terminal output
+        \\    -h, --help                  Show this help message
+        \\
+        \\READ OPTIONS:
+        \\    <image_file>...             Image file(s) to read
+        \\    --raw                       Output only decoded data
+        \\    -h, --help                  Show this help message
+        \\
+        \\ERROR CORRECTION LEVELS:
+        \\    L    Low     - 7% recovery
+        \\    M    Medium  - 15% recovery (default)
+        \\    Q    Quartile - 25% recovery
+        \\    H    High    - 30% recovery
+        \\
+        \\EXAMPLES:
+        \\    qrz generate "Hello, World!"
+        \\    qrz generate -o qr.png -e H "https://example.com"
+        \\    qrz generate -t txt -m 2 "1234567890"
+        \\    qrz generate -i data.txt -o qr.svg -t svg
+        \\
+    ;
+    std.debug.print(help, .{VERSION});
+}
+
 
