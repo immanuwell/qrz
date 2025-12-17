@@ -1305,4 +1305,29 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Config {
     return config;
 }
 
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var config = parseArgs(allocator) catch |err| {
+        if (err == error.HelpRequested or err == error.NoCommand) {
+            return;
+        }
+        std.debug.print("Error parsing arguments: {}\n", .{err});
+        return err;
+    };
+    defer config.deinit(allocator);
+
+    if (std.mem.eql(u8, config.command, "generate")) {
+        try commandGenerate(allocator, &config);
+    } else if (std.mem.eql(u8, config.command, "read")) {
+        try commandRead(allocator, &config);
+    } else {
+        std.debug.print("Unknown command: {s}\n", .{config.command});
+        std.debug.print("Use 'qrz --help' for usage information.\n", .{});
+        return error.UnknownCommand;
+    }
+}
+
 
