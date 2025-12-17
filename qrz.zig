@@ -1122,4 +1122,44 @@ pub const PNGEncoder = struct {
     }
 };
 
+// SVG Encoder
+pub const SVGEncoder = struct {
+    pub fn writeSVG(file_path: []const u8, qr: *const QRCode, scale: u32, margin: u32) !void {
+        const file = try std.fs.cwd().createFile(file_path, .{});
+        defer file.close();
+        try writeSVGToFile(file, qr, scale, margin);
+    }
+
+    pub fn writeSVGToFile(file: std.fs.File, qr: *const QRCode, scale: u32, margin: u32) !void {
+        const size = (qr.size + margin * 2) * scale;
+
+        var buf: [1024]u8 = undefined;
+        const header = try std.fmt.bufPrint(&buf,
+            \\<?xml version="1.0" encoding="UTF-8"?>
+            \\<svg xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 {d} {d}">
+            \\<rect width="{d}" height="{d}" fill="white"/>
+            \\
+        , .{ size, size, size, size });
+        try file.writeAll(header);
+
+        for (0..qr.size) |y| {
+            for (0..qr.size) |x| {
+                const ux: u32 = @intCast(x);
+                const uy: u32 = @intCast(y);
+                if (qr.getModule(ux, uy)) {
+                    const px = (margin + ux) * scale;
+                    const py = (margin + uy) * scale;
+                    const rect = try std.fmt.bufPrint(&buf,
+                        \\<rect x="{d}" y="{d}" width="{d}" height="{d}" fill="black"/>
+                        \\
+                    , .{ px, py, scale, scale });
+                    try file.writeAll(rect);
+                }
+            }
+        }
+
+        try file.writeAll("</svg>\n");
+    }
+};
+
 
