@@ -1227,4 +1227,82 @@ pub fn printHelp() void {
     std.debug.print(help, .{VERSION});
 }
 
+pub fn parseArgs(allocator: std.mem.Allocator) !Config {
+    var config = Config.init();
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    if (args.len < 2) {
+        printHelp();
+        return error.NoCommand;
+    }
+
+    // Check for help flag as first argument
+    if (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help")) {
+        printHelp();
+        return error.HelpRequested;
+    }
+
+    config.command = try allocator.dupe(u8, args[1]);
+
+    var i: usize = 2;
+    var end_of_opts = false;
+    while (i < args.len) {
+        const arg = args[i];
+
+        if (!end_of_opts and std.mem.eql(u8, arg, "--")) {
+            end_of_opts = true;
+        } else if (!end_of_opts and (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help"))) {
+            printHelp();
+            return error.HelpRequested;
+        } else if (!end_of_opts and (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--input"))) {
+            i += 1;
+            if (i >= args.len) return error.MissingValue;
+            config.input_file = try allocator.dupe(u8, args[i]);
+        } else if (!end_of_opts and (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output"))) {
+            i += 1;
+            if (i >= args.len) return error.MissingValue;
+            config.output_file = try allocator.dupe(u8, args[i]);
+        } else if (!end_of_opts and (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--type"))) {
+            i += 1;
+            if (i >= args.len) return error.MissingValue;
+            config.format = OutputFormat.fromString(args[i]) orelse return error.InvalidFormat;
+        } else if (!end_of_opts and (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--error"))) {
+            i += 1;
+            if (i >= args.len) return error.MissingValue;
+            config.error_level = ErrorCorrectionLevel.fromString(args[i]) orelse return error.InvalidErrorLevel;
+        } else if (!end_of_opts and (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--size") or std.mem.eql(u8, arg, "--scale"))) {
+            i += 1;
+            if (i >= args.len) return error.MissingValue;
+            config.size = try std.fmt.parseInt(u32, args[i], 10);
+        } else if (!end_of_opts and (std.mem.eql(u8, arg, "-m") or std.mem.eql(u8, arg, "--margin"))) {
+            i += 1;
+            if (i >= args.len) return error.MissingValue;
+            config.margin = try std.fmt.parseInt(u32, args[i], 10);
+        } else if (!end_of_opts and std.mem.eql(u8, arg, "--terminal")) {
+            config.force_terminal = true;
+        } else if (!end_of_opts and std.mem.eql(u8, arg, "--raw")) {
+            config.raw_output = true;
+        } else if (!end_of_opts and std.mem.startsWith(u8, arg, "-")) {
+            return error.UnknownOption;
+        } else {
+            // Positional argument
+            if (std.mem.eql(u8, config.command, "generate")) {
+                if (config.data.len == 0) {
+                    config.data = try allocator.dupe(u8, arg);
+                } else {
+                    // Likely missing quotes around <data> with spaces.
+                    return error.TooManyArguments;
+                }
+            } else if (std.mem.eql(u8, config.command, "read")) {
+                try config.image_files.append(allocator, try allocator.dupe(u8, arg));
+            }
+        }
+
+        i += 1;
+    }
+
+    return config;
+}
+
 
