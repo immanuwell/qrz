@@ -1412,4 +1412,37 @@ fn commandGenerate(allocator: std.mem.Allocator, config: *Config) !void {
     }
 }
 
+fn commandRead(allocator: std.mem.Allocator, config: *Config) !void {
+    if (config.image_files.items.len == 0) {
+        std.debug.print("Error: No image files provided.\n", .{});
+        return error.NoImageFiles;
+    }
+
+    for (config.image_files.items) |file_path| {
+        if (!config.raw_output) {
+            std.debug.print("Reading: {s}\n", .{file_path});
+        }
+
+        const result = QRReader.read(allocator, file_path) catch |err| {
+            if (err == error.NotImplemented) {
+                std.debug.print("Error: QR code reading is not yet implemented.\n", .{});
+                std.debug.print("Reading QR codes requires additional image processing libraries:\n", .{});
+                std.debug.print("  - Image loading (PNG, JPEG support)\n", .{});
+                std.debug.print("  - Computer vision for QR detection\n", .{});
+                std.debug.print("  - Perspective transformation\n", .{});
+                std.debug.print("  - Reed-Solomon decoding\n\n", .{});
+                std.debug.print("Consider using external tools like 'zbar' or 'zxing' for QR code reading.\n", .{});
+            }
+            return err;
+        };
+        defer allocator.free(result);
+
+        if (config.raw_output) {
+            std.debug.print("{s}\n", .{result});
+        } else {
+            std.debug.print("Decoded: {s}\n\n", .{result});
+        }
+    }
+}
+
 
