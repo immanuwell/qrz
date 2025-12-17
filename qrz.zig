@@ -29,4 +29,20 @@ pub const Mode = enum(u8) {
     Kanji = 8,
 };
 
+// Output Format
+pub const OutputFormat = enum {
+    PNG,
+    TXT,
+    ANSI,
+    SVG,
+
+    pub fn fromString(s: []const u8) ?OutputFormat {
+        if (std.ascii.eqlIgnoreCase(s, "png")) return .PNG;
+        if (std.ascii.eqlIgnoreCase(s, "txt")) return .TXT;
+        if (std.ascii.eqlIgnoreCase(s, "ansi")) return .ANSI;
+        if (std.ascii.eqlIgnoreCase(s, "svg")) return .SVG;
+        return null;
+    }
+};
+
 
