@@ -1190,10 +1190,13 @@ pub fn printHelp() void {
         \\qrz - QR Code Generator CLI Tool v{s}
         \\
         \\USAGE:
-        \\    qrz generate [OPTIONS] <data>
+        \\    qrz [OPTIONS] <data>
+        //\\    qrz generate [OPTIONS] <data>
+        //\\    qrz read [OPTIONS] <image_file>...
         \\
-        \\COMMANDS:
-        \\    generate    Generate a QR code from data
+        //\\COMMANDS:
+        //\\    generate    Generate a QR code from data (default)
+        //\\    read        Read and decode QR code from image(s)
         \\
         \\GENERATE OPTIONS:
         \\    <data>                      Data to encode (required unless -i is used)
@@ -1206,11 +1209,11 @@ pub fn printHelp() void {
         \\    --terminal                  Force terminal output
         \\    -h, --help                  Show this help message
         \\
-        \\READ OPTIONS:
-        \\    <image_file>...             Image file(s) to read
-        \\    --raw                       Output only decoded data
-        \\    -h, --help                  Show this help message
-        \\
+        //\\READ OPTIONS:
+        //\\    <image_file>...             Image file(s) to read
+        //\\    --raw                       Output only decoded data
+        //\\    -h, --help                  Show this help message
+        //\\
         \\ERROR CORRECTION LEVELS:
         \\    L    Low     - 7% recovery
         \\    M    Medium  - 15% recovery (default)
@@ -1218,34 +1221,46 @@ pub fn printHelp() void {
         \\    H    High    - 30% recovery
         \\
         \\EXAMPLES:
-        \\    qrz generate "Hello, World!"
-        \\    qrz generate -o qr.png -e H "https://example.com"
-        \\    qrz generate -t txt -m 2 "1234567890"
-        \\    qrz generate -i data.txt -o qr.svg -t svg
+        //\\    qrz generate "any text"
+        //\\    qrz generate -o qr.png -e H "https://example.com"
+        //\\    qrz generate -t txt -m 2 "1234567890"
+        //\\    qrz generate -i data.txt -o qr.svg -t svg
+        \\    qrz "any text"
+        \\    qrz -o qr.png -e H "https://example.com"
+        \\    qrz -t txt -m 2 "1234567890"
+        \\    qrz -i data.txt -o qr.svg -t svg
+        \\    qrz -o qr.png -e H "https://example.com"
+        //\\    qrz read qrcode.png
+        //\\    qrz read --raw image1.png image2.png
         \\
     ;
     std.debug.print(help, .{VERSION});
 }
 
-pub fn parseArgs(allocator: std.mem.Allocator) !Config {
+fn parseArgsFrom(allocator: std.mem.Allocator, args: []const []const u8, emit_help: bool) !Config {
     var config = Config.init();
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
     if (args.len < 2) {
-        printHelp();
+        if (emit_help) printHelp();
         return error.NoCommand;
     }
 
-    // Check for help flag as first argument
+    // Check for help flag as first argument (standard CLI behavior).
     if (std.mem.eql(u8, args[1], "-h") or std.mem.eql(u8, args[1], "--help")) {
-        printHelp();
+        if (emit_help) printHelp();
         return error.HelpRequested;
     }
 
-    config.command = try allocator.dupe(u8, args[1]);
+    // Subcommand is optional: default to `generate` unless `read` is explicitly requested.
+    // This enables: `qrz "google.com"` instead of `qrz generate "google.com"`.
+    var i: usize = 1;
+    if (std.mem.eql(u8, args[1], "generate") or std.mem.eql(u8, args[1], "read")) {
+        config.command = try allocator.dupe(u8, args[1]);
+        i = 2;
+    } else {
+        config.command = try allocator.dupe(u8, "generate");
+        i = 1;
+    }
 
-    var i: usize = 2;
     var end_of_opts = false;
     while (i < args.len) {
         const arg = args[i];
@@ -1253,7 +1268,7 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Config {
         if (!end_of_opts and std.mem.eql(u8, arg, "--")) {
             end_of_opts = true;
         } else if (!end_of_opts and (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help"))) {
-            printHelp();
+            if (emit_help) printHelp();
             return error.HelpRequested;
         } else if (!end_of_opts and (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--input"))) {
             i += 1;
@@ -1303,6 +1318,12 @@ pub fn parseArgs(allocator: std.mem.Allocator) !Config {
     }
 
     return config;
+}
+
+pub fn parseArgs(allocator: std.mem.Allocator) !Config {
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+    return parseArgsFrom(allocator, args, true);
 }
 
 pub fn main() !void {
@@ -1459,3 +1480,56 @@ test "encode basic QR (version 1, M)" {
     try std.testing.expect(qr.getModule(8, qr.size - 8)); // Dark module
 }
 
+test "CLI parsing: default generate without subcommand" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const argv = [_][]const u8{ "qrz", "google.com" };
+    var cfg = try parseArgsFrom(allocator, &argv, false);
+    defer cfg.deinit(allocator);
+
+    try std.testing.expect(std.mem.eql(u8, cfg.command, "generate"));
+    try std.testing.expect(std.mem.eql(u8, cfg.data, "google.com"));
+}
+
+test "CLI parsing: generate subcommand still works" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const argv = [_][]const u8{ "qrz", "generate", "-o", "out.png", "-e", "H", "hello" };
+    var cfg = try parseArgsFrom(allocator, &argv, false);
+    defer cfg.deinit(allocator);
+
+    try std.testing.expect(std.mem.eql(u8, cfg.command, "generate"));
+    try std.testing.expect(cfg.output_file != null);
+    try std.testing.expect(std.mem.eql(u8, cfg.output_file.?, "out.png"));
+    try std.testing.expect(cfg.error_level == .H);
+    try std.testing.expect(std.mem.eql(u8, cfg.data, "hello"));
+}
+
+test "CLI parsing: read subcommand collects image files" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const argv = [_][]const u8{ "qrz", "read", "--raw", "a.png", "b.png" };
+    var cfg = try parseArgsFrom(allocator, &argv, false);
+    defer cfg.deinit(allocator);
+
+    try std.testing.expect(std.mem.eql(u8, cfg.command, "read"));
+    try std.testing.expect(cfg.raw_output);
+    try std.testing.expectEqual(@as(usize, 2), cfg.image_files.items.len);
+    try std.testing.expect(std.mem.eql(u8, cfg.image_files.items[0], "a.png"));
+    try std.testing.expect(std.mem.eql(u8, cfg.image_files.items[1], "b.png"));
+}
+
+test "CLI parsing: help requested" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const argv = [_][]const u8{ "qrz", "--help" };
+    try std.testing.expectError(error.HelpRequested, parseArgsFrom(allocator, &argv, false));
+}
