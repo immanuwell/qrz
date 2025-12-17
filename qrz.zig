@@ -1330,4 +1330,86 @@ pub fn main() !void {
     }
 }
 
+fn commandGenerate(allocator: std.mem.Allocator, config: *Config) !void {
+    // Get data to encode
+    var data_buf: []u8 = undefined;
+    var data_owned = false;
+
+    if (config.input_file) |input_file| {
+        if (std.mem.eql(u8, input_file, "-")) {
+            // Read from stdin
+            const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
+            data_buf = try stdin.readToEndAlloc(allocator, 1024 * 1024);
+            data_owned = true;
+        } else {
+            // Read from file
+            const file = try std.fs.cwd().openFile(input_file, .{});
+            defer file.close();
+            data_buf = try file.readToEndAlloc(allocator, 1024 * 1024);
+            data_owned = true;
+        }
+    } else if (config.data.len > 0) {
+        data_buf = @constCast(config.data);
+    } else {
+        std.debug.print("Error: No data provided. Use <data> or -i option.\n", .{});
+        return error.NoData;
+    }
+    defer if (data_owned) allocator.free(data_buf);
+
+    // Generate QR code
+    var qr = try QREncoder.encode(allocator, data_buf, config.error_level);
+    defer qr.deinit();
+
+    // Output
+    const stdout_file = std.fs.File.stdout();
+
+    const wants_terminal = config.force_terminal or config.output_file == null;
+
+    if (wants_terminal) {
+        // Per spec: if no output path is provided, show terminal output (even if -t png/svg).
+        if (config.format == .ANSI) {
+            try TerminalRenderer.renderANSI(stdout_file, &qr, config.margin);
+        } else {
+            try TerminalRenderer.render(stdout_file, &qr, config.margin);
+        }
+    }
+
+    if (config.output_file) |output_file| {
+        if (std.mem.eql(u8, output_file, "-")) {
+            // Explicit stdout output. If --terminal is also set, avoid mixing binary with text.
+            if (config.force_terminal and (config.format == .PNG or config.format == .SVG)) {
+                std.debug.print("Refusing to write {s} to stdout because --terminal is set; omit --terminal or use a file path.\n", .{@tagName(config.format)});
+                return;
+            }
+            if (wants_terminal and (config.format == .TXT or config.format == .ANSI)) {
+                // Already printed the terminal representation above.
+                return;
+            }
+
+            switch (config.format) {
+                .PNG => try PNGEncoder.writePNGToFile(allocator, stdout_file, &qr, config.size, config.margin),
+                .SVG => try SVGEncoder.writeSVGToFile(stdout_file, &qr, config.size, config.margin),
+                .TXT => try TerminalRenderer.render(stdout_file, &qr, config.margin),
+                .ANSI => try TerminalRenderer.renderANSI(stdout_file, &qr, config.margin),
+            }
+        } else {
+            switch (config.format) {
+                .PNG => try PNGEncoder.writePNG(allocator, output_file, &qr, config.size, config.margin),
+                .SVG => try SVGEncoder.writeSVG(output_file, &qr, config.size, config.margin),
+                .TXT => {
+                    const file = try std.fs.cwd().createFile(output_file, .{});
+                    defer file.close();
+                    try TerminalRenderer.render(file, &qr, config.margin);
+                },
+                .ANSI => {
+                    const file = try std.fs.cwd().createFile(output_file, .{});
+                    defer file.close();
+                    try TerminalRenderer.renderANSI(file, &qr, config.margin);
+                },
+            }
+            std.debug.print("QR code saved to: {s}\n", .{output_file});
+        }
+    }
+}
+
 
