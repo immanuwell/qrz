@@ -957,4 +957,169 @@ pub const TerminalRenderer = struct {
     }
 };
 
+// PNG Encoder (simplified)
+pub const PNGEncoder = struct {
+    pub fn writePNG(allocator: std.mem.Allocator, file_path: []const u8, qr: *const QRCode, scale: u32, margin: u32) !void {
+        const file = try std.fs.cwd().createFile(file_path, .{});
+        defer file.close();
+        try writePNGToFile(allocator, file, qr, scale, margin);
+    }
+
+    pub fn writePNGToFile(allocator: std.mem.Allocator, file: std.fs.File, qr: *const QRCode, scale: u32, margin: u32) !void {
+        const width = (qr.size + margin * 2) * scale;
+        const height = width;
+
+        // Create pixel data (grayscale)
+        const pixels = try allocator.alloc(u8, width * height);
+        defer allocator.free(pixels);
+        @memset(pixels, 255); // White background
+
+        // Draw QR code
+        for (0..qr.size) |y| {
+            for (0..qr.size) |x| {
+                const ux: u32 = @intCast(x);
+                const uy: u32 = @intCast(y);
+                if (qr.getModule(ux, uy)) {
+                    const px = (margin + ux) * scale;
+                    const py = (margin + uy) * scale;
+                    for (0..scale) |dy| {
+                        for (0..scale) |dx| {
+                            const idx = (py + @as(u32, @intCast(dy))) * width + px + @as(u32, @intCast(dx));
+                            if (idx < pixels.len) {
+                                pixels[idx] = 0; // Black
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        try writePNGGrayscale8(allocator, file, pixels, width, height);
+    }
+
+    fn writePNGGrayscale8(allocator: std.mem.Allocator, file: std.fs.File, pixels: []const u8, width: u32, height: u32) !void {
+        // PNG signature
+        try file.writeAll(&[_]u8{ 137, 80, 78, 71, 13, 10, 26, 10 });
+
+        // IHDR chunk
+        try writeChunk(file, "IHDR", &[_]u8{
+            @intCast(width >> 24), @intCast((width >> 16) & 0xFF),
+            @intCast((width >> 8) & 0xFF), @intCast(width & 0xFF),
+            @intCast(height >> 24), @intCast((height >> 16) & 0xFF),
+            @intCast((height >> 8) & 0xFF), @intCast(height & 0xFF),
+            8, // bit depth
+            0, // grayscale
+            0, // compression
+            0, // filter
+            0, // interlace
+        });
+
+        // IDAT chunk (zlib stream containing scanlines with filter bytes)
+        var scanlines = std.ArrayList(u8){};
+        defer scanlines.deinit(allocator);
+        try scanlines.ensureTotalCapacity(allocator, (width + 1) * height);
+        for (0..height) |y| {
+            try scanlines.append(allocator, 0); // filter type 0
+            const row_start: usize = @intCast(y * width);
+            try scanlines.appendSlice(allocator, pixels[row_start .. row_start + width]);
+        }
+
+        const compressed = try zlibStore(allocator, scanlines.items);
+        defer allocator.free(compressed);
+        try writeChunk(file, "IDAT", compressed);
+
+        // IEND chunk
+        try writeChunk(file, "IEND", &[_]u8{});
+    }
+
+    fn zlibStore(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+        var out = std.ArrayList(u8){};
+        defer out.deinit(allocator);
+
+        // zlib header: CMF/FLG for deflate + 32K window, fastest
+        try out.appendSlice(allocator, &[_]u8{ 0x78, 0x01 });
+
+        var remaining = data;
+        while (remaining.len > 0) {
+            const chunk_len: usize = @min(remaining.len, 0xFFFF);
+            const is_final: u8 = if (chunk_len == remaining.len) 1 else 0;
+            try out.append(allocator, is_final); // BFINAL + BTYPE(00)
+
+            const len_u16: u16 = @intCast(chunk_len);
+            const nlen_u16: u16 = ~len_u16;
+            try out.appendSlice(allocator, &[_]u8{
+                @intCast(len_u16 & 0xFF),
+                @intCast((len_u16 >> 8) & 0xFF),
+                @intCast(nlen_u16 & 0xFF),
+                @intCast((nlen_u16 >> 8) & 0xFF),
+            });
+            try out.appendSlice(allocator, remaining[0..chunk_len]);
+            remaining = remaining[chunk_len..];
+        }
+
+        const adler = adler32(data);
+        try out.appendSlice(allocator, &[_]u8{
+            @intCast((adler >> 24) & 0xFF),
+            @intCast((adler >> 16) & 0xFF),
+            @intCast((adler >> 8) & 0xFF),
+            @intCast(adler & 0xFF),
+        });
+
+        return out.toOwnedSlice(allocator);
+    }
+
+    fn adler32(data: []const u8) u32 {
+        var a: u32 = 1;
+        var b: u32 = 0;
+        for (data) |byte| {
+            a = (a + byte) % 65521;
+            b = (b + a) % 65521;
+        }
+        return (b << 16) | a;
+    }
+
+    fn writeChunk(file: std.fs.File, chunk_type: []const u8, data: []const u8) !void {
+        // Length
+        const len: u32 = @intCast(data.len);
+        const len_bytes = [_]u8{
+            @intCast(len >> 24),
+            @intCast((len >> 16) & 0xFF),
+            @intCast((len >> 8) & 0xFF),
+            @intCast(len & 0xFF),
+        };
+        try file.writeAll(&len_bytes);
+
+        // Type
+        try file.writeAll(chunk_type);
+
+        // Data
+        try file.writeAll(data);
+
+        // CRC
+        var crc: u32 = 0xFFFFFFFF;
+        for (chunk_type) |b| {
+            crc = updateCRC(crc, b);
+        }
+        for (data) |b| {
+            crc = updateCRC(crc, b);
+        }
+        crc ^= 0xFFFFFFFF;
+        const crc_bytes = [_]u8{
+            @intCast(crc >> 24),
+            @intCast((crc >> 16) & 0xFF),
+            @intCast((crc >> 8) & 0xFF),
+            @intCast(crc & 0xFF),
+        };
+        try file.writeAll(&crc_bytes);
+    }
+
+    fn updateCRC(crc: u32, byte: u8) u32 {
+        var c = crc ^ byte;
+        for (0..8) |_| {
+            c = if (c & 1 == 1) (c >> 1) ^ 0xEDB88320 else c >> 1;
+        }
+        return c;
+    }
+};
+
 
