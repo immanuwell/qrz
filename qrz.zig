@@ -77,4 +77,58 @@ pub const Config = struct {
     }
 };
 
+// QR Code Structure
+pub const QRCode = struct {
+    version: u8,
+    size: u32,
+    modules: []bool,
+    is_function: []bool,
+    ecc_level: ErrorCorrectionLevel,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, version: u8, ecc: ErrorCorrectionLevel) !QRCode {
+        const size: u32 = @as(u32, version) * 4 + 17;
+        const modules = try allocator.alloc(bool, size * size);
+        const is_function = try allocator.alloc(bool, size * size);
+        @memset(modules, false);
+        @memset(is_function, false);
+
+        return QRCode{
+            .version = version,
+            .size = size,
+            .modules = modules,
+            .is_function = is_function,
+            .ecc_level = ecc,
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: *QRCode) void {
+        self.allocator.free(self.modules);
+        self.allocator.free(self.is_function);
+    }
+
+    pub fn getModule(self: *const QRCode, x: u32, y: u32) bool {
+        if (x >= self.size or y >= self.size) return false;
+        return self.modules[y * self.size + x];
+    }
+
+    pub fn setModule(self: *QRCode, x: u32, y: u32, value: bool) void {
+        if (x >= self.size or y >= self.size) return;
+        self.modules[y * self.size + x] = value;
+    }
+
+    pub fn isFunctionModule(self: *const QRCode, x: u32, y: u32) bool {
+        if (x >= self.size or y >= self.size) return false;
+        return self.is_function[y * self.size + x];
+    }
+
+    pub fn setFunctionModule(self: *QRCode, x: u32, y: u32, value: bool) void {
+        if (x >= self.size or y >= self.size) return;
+        const idx = y * self.size + x;
+        self.modules[idx] = value;
+        self.is_function[idx] = true;
+    }
+};
+
 
