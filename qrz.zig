@@ -45,4 +45,36 @@ pub const OutputFormat = enum {
     }
 };
 
+// CLI Configuration
+pub const Config = struct {
+    command: []const u8 = "",
+    data: []const u8 = "",
+    input_file: ?[]const u8 = null,
+    output_file: ?[]const u8 = null,
+    format: OutputFormat = .PNG,
+    error_level: ErrorCorrectionLevel = .M,
+    size: u32 = 10,
+    margin: u32 = 4,
+    force_terminal: bool = false,
+    raw_output: bool = false,
+    image_files: std.ArrayList([]const u8),
+
+    pub fn init() Config {
+        return Config{
+            .image_files = std.ArrayList([]const u8){},
+        };
+    }
+
+    pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
+        for (self.image_files.items) |file| {
+            allocator.free(file);
+        }
+        self.image_files.deinit(allocator);
+        if (self.command.len > 0) allocator.free(self.command);
+        if (self.input_file) |f| allocator.free(f);
+        if (self.output_file) |f| allocator.free(f);
+        if (self.data.len > 0) allocator.free(self.data);
+    }
+};
+
 
