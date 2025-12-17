@@ -217,4 +217,692 @@ pub const ReedSolomon = struct {
     }
 };
 
+// QR Code Encoder
+pub const QREncoder = struct {
+    const MAX_VERSION: u8 = 6; // Keep tables small + correct; extend with full spec tables if needed.
+
+    fn absI32(x: i32) i32 {
+        return if (x < 0) -x else x;
+    }
+
+    pub fn encode(allocator: std.mem.Allocator, data: []const u8, ecc: ErrorCorrectionLevel) !QRCode {
+        GaloisField.init();
+
+        const mode = detectMode(data);
+        const version = try selectVersion(allocator, data, mode, ecc);
+        var qr = try QRCode.init(allocator, version, ecc);
+        errdefer qr.deinit();
+
+        drawFunctionPatterns(&qr);
+
+        const data_codewords = try encodeDataCodewords(allocator, data, mode, version, ecc);
+        defer allocator.free(data_codewords);
+
+        const all_codewords = try addErrorCorrectionAndInterleave(allocator, data_codewords, version, ecc);
+        defer allocator.free(all_codewords);
+
+        drawCodewords(&qr, all_codewords);
+
+        const mask = chooseBestMask(&qr, ecc);
+        applyMask(&qr, mask);
+        drawFormatBits(&qr, ecc, mask);
+        if (version >= 7) drawVersionBits(&qr);
+
+        return qr;
+    }
+
+    fn selectVersion(allocator: std.mem.Allocator, data: []const u8, mode: Mode, ecc: ErrorCorrectionLevel) !u8 {
+        var bits = std.ArrayList(u8){};
+        defer bits.deinit(allocator);
+
+        // Build the payload bitstream once (without final padding) so we can test sizes.
+        try appendBits(allocator, &bits, @intFromEnum(mode), 4);
+        // Char count length depends on version; handled per-version below.
+        const data_bits = bits.items;
+        _ = data_bits;
+
+        for (1..MAX_VERSION + 1) |v_usize| {
+            const version: u8 = @intCast(v_usize);
+            bits.items.len = 0;
+
+            try appendBits(allocator, &bits, @intFromEnum(mode), 4);
+            const count_bits = getCharCountBits(mode, version);
+            try appendBits(allocator, &bits, @intCast(data.len), count_bits);
+
+            switch (mode) {
+                .Numeric => try encodeNumeric(allocator, &bits, data),
+                .Alphanumeric => try encodeAlphanumeric(allocator, &bits, data),
+                .Byte => try encodeByte(allocator, &bits, data),
+                .Kanji => return error.KanjiNotSupported,
+            }
+
+            const capacity_bits: usize = getNumDataCodewords(version, ecc) * 8;
+            if (bits.items.len <= capacity_bits) return version;
+        }
+
+        return error.DataTooLarge;
+    }
+
+    fn detectMode(data: []const u8) Mode {
+        var is_numeric = true;
+        var is_alpha = true;
+
+        for (data) |byte| {
+            if (byte < '0' or byte > '9') {
+                is_numeric = false;
+            }
+            if (!isAlphanumeric(byte)) {
+                is_alpha = false;
+            }
+        }
+
+        if (is_numeric) return .Numeric;
+        if (is_alpha) return .Alphanumeric;
+        return .Byte;
+    }
+
+    fn isAlphanumeric(c: u8) bool {
+        return (c >= '0' and c <= '9') or
+               (c >= 'A' and c <= 'Z') or
+               c == ' ' or c == '$' or c == '%' or c == '*' or
+               c == '+' or c == '-' or c == '.' or c == '/' or c == ':';
+    }
+
+    fn encodeDataCodewords(allocator: std.mem.Allocator, data: []const u8, mode: Mode, version: u8, ecc: ErrorCorrectionLevel) ![]u8 {
+        var bits = std.ArrayList(u8){};
+        defer bits.deinit(allocator);
+
+        // Add mode indicator (4 bits)
+        try appendBits(allocator, &bits, @intFromEnum(mode), 4);
+
+        // Add character count indicator
+        const count_bits = getCharCountBits(mode, version);
+        try appendBits(allocator, &bits, @intCast(data.len), count_bits);
+
+        // Encode data based on mode
+        switch (mode) {
+            .Numeric => try encodeNumeric(allocator, &bits, data),
+            .Alphanumeric => try encodeAlphanumeric(allocator, &bits, data),
+            .Byte => try encodeByte(allocator, &bits, data),
+            .Kanji => return error.KanjiNotSupported,
+        }
+
+        // Add terminator (up to 4 zero bits)
+        const capacity: usize = getNumDataCodewords(version, ecc);
+        const bit_capacity: usize = capacity * 8;
+        const terminator_len: usize = if (bits.items.len < bit_capacity) @min(4, bit_capacity - bits.items.len) else 0;
+        for (0..terminator_len) |_| {
+            try bits.append(allocator, 0);
+        }
+
+        // Pad to byte boundary
+        while (bits.items.len % 8 != 0) {
+            try bits.append(allocator, 0);
+        }
+
+        // Convert bits to bytes
+        var result = try allocator.alloc(u8, bits.items.len / 8);
+        for (0..result.len) |i| {
+            var byte: u8 = 0;
+            for (0..8) |j| {
+                byte = (byte << 1) | bits.items[i * 8 + j];
+            }
+            result[i] = byte;
+        }
+
+        // Add padding bytes
+        const needed: usize = capacity;
+        if (result.len < needed) {
+            const old_result = result;
+            result = try allocator.alloc(u8, needed);
+            @memcpy(result[0..old_result.len], old_result);
+            allocator.free(old_result);
+
+            var pad_idx: usize = old_result.len;
+            var pad_pattern: u8 = 0xEC;
+            while (pad_idx < needed) : (pad_idx += 1) {
+                result[pad_idx] = pad_pattern;
+                pad_pattern = if (pad_pattern == 0xEC) 0x11 else 0xEC;
+            }
+        }
+
+        return result;
+    }
+
+    fn appendBits(allocator: std.mem.Allocator, bits: *std.ArrayList(u8), value: u32, count: u32) !void {
+        var i: u32 = count;
+        while (i > 0) {
+            i -= 1;
+            const bit: u8 = if ((value >> @intCast(i)) & 1 == 1) 1 else 0;
+            try bits.append(allocator, bit);
+        }
+    }
+
+    fn encodeNumeric(allocator: std.mem.Allocator, bits: *std.ArrayList(u8), data: []const u8) !void {
+        var i: usize = 0;
+        while (i < data.len) {
+            const chunk_len = @min(3, data.len - i);
+            var value: u32 = 0;
+            for (0..chunk_len) |j| {
+                value = value * 10 + (data[i + j] - '0');
+            }
+            const bit_count: u32 = if (chunk_len == 3) 10 else if (chunk_len == 2) 7 else 4;
+            try appendBits(allocator, bits, value, bit_count);
+            i += chunk_len;
+        }
+    }
+
+    fn encodeAlphanumeric(allocator: std.mem.Allocator, bits: *std.ArrayList(u8), data: []const u8) !void {
+        const ALPHANUMERIC_CHARSET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
+
+        var i: usize = 0;
+        while (i < data.len) {
+            const val1 = std.mem.indexOfScalar(u8, ALPHANUMERIC_CHARSET, data[i]) orelse 0;
+            if (i + 1 < data.len) {
+                const val2 = std.mem.indexOfScalar(u8, ALPHANUMERIC_CHARSET, data[i + 1]) orelse 0;
+                try appendBits(allocator, bits, @intCast(val1 * 45 + val2), 11);
+                i += 2;
+            } else {
+                try appendBits(allocator, bits, @intCast(val1), 6);
+                i += 1;
+            }
+        }
+    }
+
+    fn encodeByte(allocator: std.mem.Allocator, bits: *std.ArrayList(u8), data: []const u8) !void {
+        for (data) |byte| {
+            try appendBits(allocator, bits, byte, 8);
+        }
+    }
+
+    fn getCharCountBits(mode: Mode, version: u8) u32 {
+        return switch (mode) {
+            .Numeric => if (version < 10) 10 else if (version < 27) 12 else 14,
+            .Alphanumeric => if (version < 10) 9 else if (version < 27) 11 else 13,
+            .Byte => if (version < 10) 8 else 16,
+            .Kanji => if (version < 10) 8 else if (version < 27) 10 else 12,
+        };
+    }
+
+    fn getECCCodewordsPerBlock(ecc: ErrorCorrectionLevel, version: u8) u8 {
+        if (version < 1 or version > MAX_VERSION) return 0;
+        const table = [_][7]u8{
+            // L
+            [_]u8{ 0, 7, 10, 15, 20, 26, 18 },
+            // M
+            [_]u8{ 0, 10, 16, 26, 18, 24, 16 },
+            // Q
+            [_]u8{ 0, 13, 22, 18, 26, 18, 24 },
+            // H
+            [_]u8{ 0, 17, 28, 22, 16, 22, 28 },
+        };
+        return table[@intFromEnum(ecc)][version];
+    }
+
+    fn getNumErrorCorrectionBlocks(ecc: ErrorCorrectionLevel, version: u8) u8 {
+        if (version < 1 or version > MAX_VERSION) return 0;
+        const table = [_][7]u8{
+            // L
+            [_]u8{ 0, 1, 1, 1, 1, 1, 2 },
+            // M
+            [_]u8{ 0, 1, 1, 1, 2, 2, 4 },
+            // Q
+            [_]u8{ 0, 1, 1, 2, 2, 4, 4 },
+            // H
+            [_]u8{ 0, 1, 1, 2, 4, 4, 4 },
+        };
+        return table[@intFromEnum(ecc)][version];
+    }
+
+    fn getNumRawDataModules(version: u8) u32 {
+        const v: u32 = version;
+        var result: u32 = (16 * v + 128) * v + 64;
+        if (version >= 2) {
+            const num_align: u32 = v / 7 + 2;
+            result -= (25 * num_align - 10) * num_align - 55;
+            if (version >= 7) result -= 36;
+        }
+        return result;
+    }
+
+    fn getNumDataCodewords(version: u8, ecc: ErrorCorrectionLevel) usize {
+        if (version < 1 or version > MAX_VERSION) return 0;
+        const total_codewords: u32 = getNumRawDataModules(version) / 8;
+        const ecc_per_block: u32 = getECCCodewordsPerBlock(ecc, version);
+        const num_blocks: u32 = getNumErrorCorrectionBlocks(ecc, version);
+        return @intCast(total_codewords - ecc_per_block * num_blocks);
+    }
+
+    fn getAlignmentPatternPositions(version: u8, out: *[7]u8) []const u8 {
+        if (version == 1) return &[_]u8{};
+        const size: u8 = version * 4 + 17;
+        const num_align: u8 = version / 7 + 2;
+        out[0] = 6;
+        out[num_align - 1] = size - 7;
+        if (num_align > 2) {
+            var step: u8 = @intCast((size - 13) / (num_align - 1));
+            if (step % 2 == 1) step += 1;
+            var pos: u8 = size - 7 - step;
+            var i: i32 = @intCast(num_align - 2);
+            while (i >= 1) : (i -= 1) {
+                out[@intCast(i)] = pos;
+                pos -= step;
+            }
+        }
+        return out[0..num_align];
+    }
+
+    fn drawFunctionPatterns(qr: *QRCode) void {
+        // Finder patterns + separators (included in the 9x9 drawing)
+        drawFinderPattern(qr, 3, 3);
+        drawFinderPattern(qr, @intCast(qr.size - 4), 3);
+        drawFinderPattern(qr, 3, @intCast(qr.size - 4));
+
+        // Timing patterns
+        for (8..qr.size - 8) |i| {
+            const color = (i % 2) == 0;
+            qr.setFunctionModule(@intCast(i), 6, color);
+            qr.setFunctionModule(6, @intCast(i), color);
+        }
+
+        // Alignment patterns
+        var pos_buf: [7]u8 = undefined;
+        const positions = getAlignmentPatternPositions(qr.version, &pos_buf);
+        for (positions) |y| {
+            for (positions) |x| {
+                // Skip the three finder corners
+                if ((x == 6 and y == 6) or
+                    (x == 6 and y == qr.size - 7) or
+                    (x == qr.size - 7 and y == 6))
+                {
+                    continue;
+                }
+                drawAlignmentPattern(qr, x, y);
+            }
+        }
+
+        // Dark module
+        qr.setFunctionModule(8, @intCast(qr.size - 8), true);
+
+        // Reserve format information areas (set to light; overwritten later)
+        for (0..6) |i| qr.setFunctionModule(8, @intCast(i), false);
+        qr.setFunctionModule(8, 7, false);
+        qr.setFunctionModule(8, 8, false);
+        qr.setFunctionModule(7, 8, false);
+        for (0..6) |i| qr.setFunctionModule(@intCast(i), 8, false);
+        for (0..8) |i| qr.setFunctionModule(@intCast(qr.size - 1 - i), 8, false);
+        for (0..7) |i| qr.setFunctionModule(8, @intCast(qr.size - 1 - i), false);
+
+        // Reserve version info
+        if (qr.version >= 7) {
+            for (0..6) |i| {
+                for (0..3) |j| {
+                    const x: u32 = @intCast(i);
+                    const y: u32 = @intCast(j);
+                    qr.setFunctionModule(qr.size - 11 + x, y, false);
+                    qr.setFunctionModule(y, qr.size - 11 + x, false);
+                }
+            }
+        }
+    }
+
+    fn drawFinderPattern(qr: *QRCode, x: u32, y: u32) void {
+        const cx: i32 = @intCast(x);
+        const cy: i32 = @intCast(y);
+        for (0..9) |dy_usize| {
+            for (0..9) |dx_usize| {
+                const dx: i32 = @as(i32, @intCast(dx_usize)) - 4;
+                const dy: i32 = @as(i32, @intCast(dy_usize)) - 4;
+                const dist: i32 = @max(absI32(dx), absI32(dy));
+                const color = dist != 2 and dist != 4;
+                const xx: i32 = cx + dx;
+                const yy: i32 = cy + dy;
+                if (xx >= 0 and yy >= 0 and xx < @as(i32, @intCast(qr.size)) and yy < @as(i32, @intCast(qr.size))) {
+                    qr.setFunctionModule(@intCast(xx), @intCast(yy), color);
+                }
+            }
+        }
+    }
+
+    fn drawAlignmentPattern(qr: *QRCode, x: u8, y: u8) void {
+        const cx: u32 = x;
+        const cy: u32 = y;
+        for (0..5) |dy| {
+            for (0..5) |dx| {
+                const dist_x: i32 = absI32(@as(i32, @intCast(dx)) - 2);
+                const dist_y: i32 = absI32(@as(i32, @intCast(dy)) - 2);
+                const dist: i32 = @max(dist_x, dist_y);
+                const color = dist != 1;
+                qr.setFunctionModule(cx + @as(u32, @intCast(dx)) - 2, cy + @as(u32, @intCast(dy)) - 2, color);
+            }
+        }
+    }
+
+    fn addErrorCorrectionAndInterleave(allocator: std.mem.Allocator, data: []const u8, version: u8, ecc: ErrorCorrectionLevel) ![]u8 {
+        const num_blocks: usize = getNumErrorCorrectionBlocks(ecc, version);
+        const ecc_len: usize = getECCCodewordsPerBlock(ecc, version);
+        const total_codewords: usize = @intCast(getNumRawDataModules(version) / 8);
+        const data_len: usize = data.len;
+
+        const short_block_len: usize = data_len / num_blocks;
+        const num_long_blocks: usize = data_len % num_blocks;
+        const num_short_blocks: usize = num_blocks - num_long_blocks;
+        const long_block_len: usize = short_block_len + 1;
+
+        var blocks = try allocator.alloc([]const u8, num_blocks);
+        defer allocator.free(blocks);
+        var ecc_blocks = try allocator.alloc([]u8, num_blocks);
+        defer allocator.free(ecc_blocks);
+
+        var offset: usize = 0;
+        var filled: usize = 0;
+        errdefer {
+            for (0..filled) |i| allocator.free(ecc_blocks[i]);
+        }
+        for (0..num_blocks) |b| {
+            const is_long = b >= num_short_blocks;
+            const block_len = if (is_long) long_block_len else short_block_len;
+            const slice = data[offset .. offset + block_len];
+            offset += block_len;
+            blocks[b] = slice;
+            ecc_blocks[b] = try reedSolomonComputeRemainder(allocator, slice, ecc_len);
+            filled += 1;
+        }
+        defer {
+            for (ecc_blocks) |blk| allocator.free(blk);
+        }
+
+        var result = try allocator.alloc(u8, total_codewords);
+        var out_idx: usize = 0;
+
+        // Interleave data bytes
+        for (0..long_block_len) |i| {
+            for (0..num_blocks) |b| {
+                const blk = blocks[b];
+                if (i < blk.len) {
+                    result[out_idx] = blk[i];
+                    out_idx += 1;
+                }
+            }
+        }
+
+        // Interleave ECC bytes (all blocks same ecc_len)
+        for (0..ecc_len) |i| {
+            for (0..num_blocks) |b| {
+                result[out_idx] = ecc_blocks[b][i];
+                out_idx += 1;
+            }
+        }
+
+        std.debug.assert(out_idx == total_codewords);
+        return result;
+    }
+
+    fn reedSolomonComputeDivisor(allocator: std.mem.Allocator, degree: usize) ![]u8 {
+        var result = try allocator.alloc(u8, degree);
+        @memset(result, 0);
+        result[degree - 1] = 1;
+        var root: u8 = 1;
+        for (0..degree) |_| {
+            for (0..degree) |i| {
+                result[i] = GaloisField.multiply(result[i], root);
+                if (i + 1 < degree) result[i] ^= result[i + 1];
+            }
+            root = GaloisField.multiply(root, 0x02);
+        }
+        return result;
+    }
+
+    fn reedSolomonComputeRemainder(allocator: std.mem.Allocator, data: []const u8, degree: usize) ![]u8 {
+        const divisor = try reedSolomonComputeDivisor(allocator, degree);
+        defer allocator.free(divisor);
+
+        var result = try allocator.alloc(u8, degree);
+        @memset(result, 0);
+
+        for (data) |b| {
+            const factor = b ^ result[0];
+            std.mem.copyForwards(u8, result[0 .. degree - 1], result[1..degree]);
+            result[degree - 1] = 0;
+            for (0..degree) |i| {
+                result[i] ^= GaloisField.multiply(divisor[i], factor);
+            }
+        }
+        return result;
+    }
+
+    fn drawCodewords(qr: *QRCode, codewords: []const u8) void {
+        var bit_idx: usize = 0;
+        const total_bits: usize = codewords.len * 8;
+
+        var right: i32 = @intCast(qr.size - 1);
+        var y: i32 = @intCast(qr.size - 1);
+        var upward = true;
+
+        while (right > 0) : (right -= 2) {
+            if (right == 6) right -= 1;
+            while (true) {
+                for (0..2) |dx| {
+                    const x: u32 = @intCast(right - @as(i32, @intCast(dx)));
+                    const yy: u32 = @intCast(y);
+                    if (!qr.isFunctionModule(x, yy)) {
+                        const bit: bool = if (bit_idx < total_bits)
+                            (((codewords[bit_idx / 8] >> @intCast(7 - (bit_idx % 8))) & 1) == 1)
+                        else
+                            false;
+                        qr.setModule(x, yy, bit);
+                        bit_idx += 1;
+                    }
+                }
+                if (upward) {
+                    if (y == 0) break;
+                    y -= 1;
+                } else {
+                    if (y == @as(i32, @intCast(qr.size - 1))) break;
+                    y += 1;
+                }
+            }
+            upward = !upward;
+        }
+    }
+
+    fn maskBit(mask: u8, x: u32, y: u32) bool {
+        return switch (mask) {
+            0 => ((x + y) % 2) == 0,
+            1 => (y % 2) == 0,
+            2 => (x % 3) == 0,
+            3 => ((x + y) % 3) == 0,
+            4 => (((x / 3) + (y / 2)) % 2) == 0,
+            5 => ((x * y) % 2 + (x * y) % 3) == 0,
+            6 => ((((x * y) % 2) + ((x * y) % 3)) % 2) == 0,
+            7 => ((((x + y) % 2) + ((x * y) % 3)) % 2) == 0,
+            else => false,
+        };
+    }
+
+    fn applyMask(qr: *QRCode, mask: u8) void {
+        for (0..qr.size) |y| {
+            for (0..qr.size) |x| {
+                const ux: u32 = @intCast(x);
+                const uy: u32 = @intCast(y);
+                if (!qr.isFunctionModule(ux, uy) and maskBit(mask, ux, uy)) {
+                    qr.setModule(ux, uy, !qr.getModule(ux, uy));
+                }
+            }
+        }
+    }
+
+    fn chooseBestMask(qr: *QRCode, ecc: ErrorCorrectionLevel) u8 {
+        var best_mask: u8 = 0;
+        var best_score: i32 = std.math.maxInt(i32);
+
+        const saved = qr.allocator.alloc(bool, qr.modules.len) catch return 0;
+        defer qr.allocator.free(saved);
+        @memcpy(saved, qr.modules);
+
+        for (0..8) |mask_usize| {
+            const mask: u8 = @intCast(mask_usize);
+            @memcpy(qr.modules, saved);
+            applyMask(qr, mask);
+            drawFormatBits(qr, ecc, mask);
+            const score = getPenaltyScore(qr);
+            if (score < best_score) {
+                best_score = score;
+                best_mask = mask;
+            }
+        }
+
+        @memcpy(qr.modules, saved);
+        return best_mask;
+    }
+
+    fn getPenaltyScore(qr: *const QRCode) i32 {
+        var result: i32 = 0;
+        const size: usize = qr.size;
+
+        // Adjacent modules in row having same color.
+        for (0..size) |y| {
+            var run_color = qr.getModule(0, @intCast(y));
+            var run_len: usize = 1;
+            for (1..size) |x| {
+                const color = qr.getModule(@intCast(x), @intCast(y));
+                if (color == run_color) {
+                    run_len += 1;
+                    if (run_len == 5) result += 3 else if (run_len > 5) result += 1;
+                } else {
+                    run_color = color;
+                    run_len = 1;
+                }
+            }
+        }
+
+        // Adjacent modules in column having same color.
+        for (0..size) |x| {
+            var run_color = qr.getModule(@intCast(x), 0);
+            var run_len: usize = 1;
+            for (1..size) |y| {
+                const color = qr.getModule(@intCast(x), @intCast(y));
+                if (color == run_color) {
+                    run_len += 1;
+                    if (run_len == 5) result += 3 else if (run_len > 5) result += 1;
+                } else {
+                    run_color = color;
+                    run_len = 1;
+                }
+            }
+        }
+
+        // 2x2 blocks of same color.
+        for (0..size - 1) |y| {
+            for (0..size - 1) |x| {
+                const a = qr.getModule(@intCast(x), @intCast(y));
+                const b = qr.getModule(@intCast(x + 1), @intCast(y));
+                const c = qr.getModule(@intCast(x), @intCast(y + 1));
+                const d = qr.getModule(@intCast(x + 1), @intCast(y + 1));
+                if (a == b and b == c and c == d) result += 3;
+            }
+        }
+
+        // Finder-like patterns.
+        const pattern1 = [_]bool{ true, false, true, true, true, false, true, false, false, false, false };
+        const pattern2 = [_]bool{ false, false, false, false, true, false, true, true, true, false, true };
+        for (0..size) |y| {
+            for (0..size - 10) |x| {
+                var match1 = true;
+                var match2 = true;
+                for (0..11) |k| {
+                    const color = qr.getModule(@intCast(x + k), @intCast(y));
+                    if (color != pattern1[k]) match1 = false;
+                    if (color != pattern2[k]) match2 = false;
+                }
+                if (match1 or match2) result += 40;
+            }
+        }
+        for (0..size) |x| {
+            for (0..size - 10) |y| {
+                var match1 = true;
+                var match2 = true;
+                for (0..11) |k| {
+                    const color = qr.getModule(@intCast(x), @intCast(y + k));
+                    if (color != pattern1[k]) match1 = false;
+                    if (color != pattern2[k]) match2 = false;
+                }
+                if (match1 or match2) result += 40;
+            }
+        }
+
+        // Balance of black and white modules.
+        var black: i32 = 0;
+        for (qr.modules) |m| {
+            if (m) black += 1;
+        }
+        const total: i32 = @intCast(qr.modules.len);
+        const imbalance: i32 = black * 20 - total * 10;
+        const k: i32 = @divTrunc(absI32(imbalance), total);
+        result += k * 10;
+
+        return result;
+    }
+
+    fn drawFormatBits(qr: *QRCode, ecc: ErrorCorrectionLevel, mask: u8) void {
+        const ecc_bits: u32 = switch (ecc) {
+            .L => 1,
+            .M => 0,
+            .Q => 3,
+            .H => 2,
+        };
+        const data: u32 = (ecc_bits << 3) | mask;
+        var rem: u32 = data << 10;
+        const gen: u32 = 0x537;
+        var i: i32 = 14;
+        while (i >= 10) : (i -= 1) {
+            if (((rem >> @intCast(i)) & 1) != 0) {
+                rem ^= gen << @intCast(i - 10);
+            }
+        }
+        const bits: u32 = (((data << 10) | (rem & 0x3FF)) ^ 0x5412);
+
+        for (0..15) |j| {
+            const bit = ((bits >> @intCast(j)) & 1) != 0;
+
+            if (j < 6) {
+                qr.setFunctionModule(8, @intCast(j), bit);
+            } else if (j == 6) {
+                qr.setFunctionModule(8, 7, bit);
+            } else if (j == 7) {
+                qr.setFunctionModule(8, 8, bit);
+            } else if (j == 8) {
+                qr.setFunctionModule(7, 8, bit);
+            } else {
+                qr.setFunctionModule(@intCast(14 - j), 8, bit);
+            }
+
+            if (j < 8) {
+                qr.setFunctionModule(@intCast(qr.size - 1 - j), 8, bit);
+            } else {
+                qr.setFunctionModule(8, @intCast(qr.size - 15 + j), bit);
+            }
+        }
+    }
+
+    fn drawVersionBits(qr: *QRCode) void {
+        var rem: u32 = @as(u32, qr.version) << 12;
+        const gen: u32 = 0x1F25;
+        var i: i32 = 17;
+        while (i >= 12) : (i -= 1) {
+            if (((rem >> @intCast(i)) & 1) != 0) {
+                rem ^= gen << @intCast(i - 12);
+            }
+        }
+        const bits: u32 = (@as(u32, qr.version) << 12) | (rem & 0xFFF);
+        for (0..18) |j| {
+            const bit = ((bits >> @intCast(j)) & 1) != 0;
+            const x: u32 = qr.size - 11 + @as(u32, @intCast(j % 3));
+            const y: u32 = @intCast(j / 3);
+            qr.setFunctionModule(x, y, bit);
+            qr.setFunctionModule(y, x, bit);
+        }
+    }
+};
+
 
