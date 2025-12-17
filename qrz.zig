@@ -21,4 +21,12 @@ pub const ErrorCorrectionLevel = enum(u8) {
     }
 };
 
+// QR Code Modes
+pub const Mode = enum(u8) {
+    Numeric = 1,
+    Alphanumeric = 2,
+    Byte = 4,
+    Kanji = 8,
+};
+
 
