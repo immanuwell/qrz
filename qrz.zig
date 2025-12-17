@@ -1445,4 +1445,17 @@ fn commandRead(allocator: std.mem.Allocator, config: *Config) !void {
     }
 }
 
+test "encode basic QR (version 1, M)" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var qr = try QREncoder.encode(allocator, "Hello, World!", .M);
+    defer qr.deinit();
+
+    try std.testing.expectEqual(@as(u8, 1), qr.version);
+    try std.testing.expectEqual(@as(u32, 21), qr.size);
+    try std.testing.expect(qr.getModule(3, 3)); // Finder pattern center
+    try std.testing.expect(qr.getModule(8, qr.size - 8)); // Dark module
+}
 
