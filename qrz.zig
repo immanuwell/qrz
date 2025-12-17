@@ -905,4 +905,56 @@ pub const QREncoder = struct {
     }
 };
 
+// Terminal Renderer
+pub const TerminalRenderer = struct {
+    pub fn render(file: std.fs.File, qr: *const QRCode, margin: u32) !void {
+        const total_w: u32 = qr.size + margin * 2;
+        const total_h: u32 = qr.size + margin * 2;
+
+        var y: u32 = 0;
+        while (y < total_h) : (y += 2) {
+            var x: u32 = 0;
+            while (x < total_w) : (x += 1) {
+                const qr_x: i32 = @as(i32, @intCast(x)) - @as(i32, @intCast(margin));
+                const qr_y_top: i32 = @as(i32, @intCast(y)) - @as(i32, @intCast(margin));
+                const qr_y_bottom: i32 = qr_y_top + 1;
+
+                const top = (qr_x >= 0 and qr_y_top >= 0 and qr_x < @as(i32, @intCast(qr.size)) and qr_y_top < @as(i32, @intCast(qr.size))) and
+                    qr.getModule(@intCast(qr_x), @intCast(qr_y_top));
+                const bottom = (qr_x >= 0 and qr_y_bottom >= 0 and qr_x < @as(i32, @intCast(qr.size)) and qr_y_bottom < @as(i32, @intCast(qr.size))) and
+                    qr.getModule(@intCast(qr_x), @intCast(qr_y_bottom));
+
+                if (top and bottom) {
+                    try file.writeAll("█");
+                } else if (top and !bottom) {
+                    try file.writeAll("▀");
+                } else if (!top and bottom) {
+                    try file.writeAll("▄");
+                } else {
+                    try file.writeAll(" ");
+                }
+            }
+            try file.writeAll("\n");
+        }
+    }
+
+    pub fn renderANSI(file: std.fs.File, qr: *const QRCode, margin: u32) !void {
+        const total: u32 = qr.size + margin * 2;
+        for (0..total) |y| {
+            for (0..total) |x| {
+                const qr_x: i32 = @as(i32, @intCast(x)) - @as(i32, @intCast(margin));
+                const qr_y: i32 = @as(i32, @intCast(y)) - @as(i32, @intCast(margin));
+                const black = (qr_x >= 0 and qr_y >= 0 and qr_x < @as(i32, @intCast(qr.size)) and qr_y < @as(i32, @intCast(qr.size))) and
+                    qr.getModule(@intCast(qr_x), @intCast(qr_y));
+                if (black) {
+                    try file.writeAll("\x1b[40m  \x1b[0m");
+                } else {
+                    try file.writeAll("\x1b[47m  \x1b[0m");
+                }
+            }
+            try file.writeAll("\n");
+        }
+    }
+};
+
 
