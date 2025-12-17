@@ -131,4 +131,44 @@ pub const QRCode = struct {
     }
 };
 
+// Galois Field arithmetic for Reed-Solomon
+pub const GaloisField = struct {
+    const FIELD_SIZE = 256;
+    const PRIMITIVE = 0x11D; // x^8 + x^4 + x^3 + x^2 + 1
+
+    var exp_table: [FIELD_SIZE]u8 = undefined;
+    var log_table: [FIELD_SIZE]u8 = undefined;
+    var initialized = false;
+
+    pub fn init() void {
+        if (initialized) return;
+
+        var x: u32 = 1;
+        for (0..FIELD_SIZE) |i| {
+            exp_table[i] = @intCast(x);
+            log_table[x] = @intCast(i);
+            x = x << 1;
+            if (x >= FIELD_SIZE) {
+                x ^= PRIMITIVE;
+            }
+        }
+        initialized = true;
+    }
+
+    pub fn multiply(a: u8, b: u8) u8 {
+        if (a == 0 or b == 0) return 0;
+        const log_a: u32 = log_table[a];
+        const log_b: u32 = log_table[b];
+        return exp_table[(log_a + log_b) % 255];
+    }
+
+    pub fn exp(x: u8) u8 {
+        return exp_table[x];
+    }
+
+    pub fn log(x: u8) u8 {
+        return log_table[x];
+    }
+};
+
 
