@@ -1,4 +1,4 @@
-# qrz - QR code generator CLI tool
+# qrz - CLI QR code generator
 
 ```bash
 USAGE:
